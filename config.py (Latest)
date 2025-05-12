@@ -1,0 +1,36 @@
+hf_token =  "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"
+
+pretraining_data_hf_repo_id = "CRM-LLM-01/CRM_Dataset"
+pretraining_data_hf_filename = "pretraining_conversation_data.db"
+
+finetuning_data_hf_repo_id = "CRM-LLM-01/CRM_Dataset"
+finetuning_data_hf_filename = "instruction_finetune_data_new.db"
+
+base_model_hf_repo_id = "CRM-LLM-01/Base_Model"  
+GQA_base_model_path = "model/model_and_optimizer_llama32.pth"
+GQA_pretraining_loss_plot_path = "training/pretraining_loss.pdf"
+
+
+finetuned_model_hf_repo_id = "CRM-LLM-01/Finetuned_Model"
+# finetuned_GQA_model_path = "model/instruction_fine_tuned_llama32.pth"
+finetuned_GQA_model_path = "model/instruction_fine_tuned_llama32_conversation2.pth"
+finetuning_GQA_loss_plot_path = "training/finetuning_loss.pdf"
+lora_llama_finetuned_GQA_model_path = "model/instruction_fine_tuned_lora_llama.pth"
+lora_llama_finetuning_GQA_loss_plot_path = "training/finetuning_loss_lora_llama.pdf"
+
+ipo_data_hf_repo_id = "CRM-LLM-01/CRM_Dataset"
+ipo_data_hf_filename = "ipo_data.db"
+ipo_finetuned_GQA_model_path = "model/ipo_llama.pth"
+ipo_finetuned_loss_plot_path = "training/ipo_loss.pdf"
+
+dpo_finetuned_GQA_model_path = "model/dpo_llama.pth"
+dpo_finetuned_loss_plot_path = "training/dpo_loss.pdf"
+
+topic_modeling_repo_id = "CRM-LLM-01/Topic_Modeling"
+owner_topic_eval_data = "owner_topic_eval_data.csv"
+tenant_topic_eval_data = "tenant_topic_eval_data.csv"
+tenant_topic_name = "tenant_topic_model/tenant_topic_name.json"
+owner_topic_name = "owner_topic_model/owner_topic_name.json"
+tenant_topic_model = "tenant_topic_model/bertopic_model"
+owner_topic_model = "owner_topic_model/bertopic_model"
+data_changes_log = "changes_log.json"
