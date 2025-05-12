@@ -24,7 +24,7 @@ from config import (
 
 # ✅ updated output model path
 output_model_filename = "model/instruction_fine_tuned_llama32_rlrefined.pth"
-output_loss_plot = "training/finetuning_loss_rlrefined.pdf"
+output_loss_plot = "training/finetuning_loss_rlrefined.png"
 previous_model_path = "model/instruction_fine_tuned_llama32_conversation2.pth"
 
 # Setup logging
@@ -124,6 +124,14 @@ def main(rank, world_size):
             "model_state_dict": model.module.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
         }, output_model_filename)
+
+        epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+
+        print(f"Epochs seen: {epochs_tensor.tolist()}")
+        print(f"Train losses: {train_losses}")
+        print(f"Val losses: {val_losses}")
+        print(f"Tokens seen: {tokens_seen}")
+
 
         plot_losses(torch.linspace(0, num_epochs, len(train_losses)), tokens_seen, train_losses, val_losses)
         plt.savefig(output_loss_plot)
