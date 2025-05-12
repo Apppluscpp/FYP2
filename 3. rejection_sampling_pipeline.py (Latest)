@@ -327,8 +327,8 @@ if __name__ == "__main__":
     fast_filter_top_completions(
         input_file="scored_completions.json",
         output_file="filtered_completions.json",
-        top_k=1,
-        score_threshold=0.5  # optional
+        top_k=3,
+        score_threshold=0.5  
     )
 
     print("[🔧] Converting filtered completions to fine-tuning format...")
