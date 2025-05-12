@@ -1,0 +1,280 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import sqlite3
+import json
+import torch
+from tqdm import tqdm
+from huggingface_hub import hf_hub_download
+from llama_prompt import InstructionPrompt
+from llama_structure import Llama3Model
+from llama_training_speedup_utils import Tokenizer, generate_text_simple
+from parameters import LLAMA32_CONFIG_1B
+from config import finetuned_GQA_model_path 
+from sentence_transformers import CrossEncoder
+import torch
+import torch.nn.functional as F
+import re  # for cleaning
+from typing import List
+from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# === Step 1: Download DB from Hugging Face ===
+
+def fetch_db_from_huggingface(repo_id, filename, token):
+    db_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type="dataset",
+        token=token
+    )
+    print(f"[📥] Downloaded database to: {db_path}")
+    return db_path
+
+
+# === Step 2: Extract Queries from All Tables ===
+
+def extract_questions_from_all_tables(db_path):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [row[0] for row in cursor.fetchall()]
+
+    questions = []
+    for table in tables:
+        try:
+            cursor.execute(f"PRAGMA table_info({table});")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'question' in columns:
+                cursor.execute(f"SELECT question FROM {table};")
+                rows = cursor.fetchall()
+                questions.extend([row[0] for row in rows])
+            else:
+                print(f"[⚠️] Table {table} has no 'question' column.")
+        except Exception as e:
+            print(f"[❌] Error in table {table}: {e}")
+
+    conn.close()
+    return questions
+
+
+# === Step 3: Format Prompts ===
+
+# def generate_instruction_prompts(queries, system_prompt="You are a helpful assistant"):
+#     formatter = InstructionPrompt(system_prompt=system_prompt)
+#     prompts = [f"### Instruction:\n{q}\n\n### Response:" for q in queries]
+#     return prompts
+
+
+# === Step 4: Save Prompts to File ===
+
+def save_prompts_to_file(prompts, filename="rejection_sampling_prompts.txt"):
+    with open(filename, "w", encoding="utf-8") as f:
+        for prompt in prompts:
+            f.write(prompt + "\n\n")
+    print(f"[✅] Saved {len(prompts)} prompts to {filename}")
+
+
+# === Step 5: Sample Completions ===
+
+def generate_text_sampled(model, idx, max_new_tokens, context_size, temperature=1.0, top_k=20):
+    """
+    Generate text using top-k sampling.
+    """
+    model.eval()
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -context_size:]
+        with torch.no_grad():
+            logits = model(idx_cond)
+        logits = logits[:, -1, :] / temperature
+
+        if top_k > 0:
+            top_k_values, _ = torch.topk(logits, top_k)
+            cutoff = top_k_values[:, -1].unsqueeze(-1)
+            logits[logits < cutoff] = -float('Inf')
+
+        probs = F.softmax(logits, dim=-1)
+        idx_next = torch.multinomial(probs, num_samples=1)
+        idx = torch.cat((idx, idx_next), dim=1)
+
+    return idx
+
+
+# def truncate_at_special_token(text: str) -> str:
+#     """
+#     Truncate the generated text at the first appearance of special tokens or noisy content.
+#     """
+#     stop_tokens = [
+#         "<|eot_id|>", "<|end_of_text|>", "<|begin_of_text|>",
+#         "<|start_header_id|>", "user<|end_header_id|>", "system<|end_header_id|>"
+#     ]
+#     for token in stop_tokens:
+#         if token in text:
+#             return text.split(token)[0].strip()
+#     return text.strip()
+
+
+# === SAMPLING ===
+def sample_completions(model, tokenizer, prompt_file, output_file, max_prompts=100, completions_per_prompt=4, batch_size=32):
+    with open(prompt_file, "r", encoding="utf-8") as f:
+        all_prompts = f.read().strip().split("\n\n")
+
+    prompts = all_prompts[:max_prompts]
+    all_samples = []
+
+    print(f"[🎯] Sampling {completions_per_prompt} completions each for {len(prompts)} prompts (batch size = {batch_size})...")
+
+    for i in tqdm(range(0, len(prompts), batch_size), desc="Sampling"):
+        batch_prompts = prompts[i:i + batch_size]
+
+        # Repeat each prompt for N completions
+        expanded_prompts = []
+        for prompt in batch_prompts:
+            expanded_prompts.extend([prompt] * completions_per_prompt)
+
+        # Tokenize all
+        inputs = tokenizer(expanded_prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
+
+        # Generate in batch
+        outputs = model.generate(
+            **inputs,
+            do_sample=True,
+            temperature=0.7,
+            top_k=25,
+            max_new_tokens=256,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+        decoded = tokenizer.batch_decode(outputs[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+
+        # Reconstruct per-prompt completions
+        for j, prompt in enumerate(batch_prompts):
+            completions = decoded[j * completions_per_prompt:(j + 1) * completions_per_prompt]
+            all_samples.append({
+                "prompt": prompt,
+                "completions": [c.strip() for c in completions]
+            })
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(all_samples, f, indent=2)
+
+    print(f"[✅] Saved completions to {output_file}")
+
+def score_completions_with_reward_model(input_file, output_file, model_name="cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    from sentence_transformers import CrossEncoder
+    import numpy as np
+
+    # Load frozen reward model
+    reward_model = CrossEncoder(model_name)
+    reward_model.eval()
+
+    with open(input_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    scored = []
+    all_scores = []
+
+    for item in tqdm(data, desc="Scoring"):
+        prompt = item["prompt"]
+        completions = item["completions"]
+
+        # Prepare (prompt, completion) pairs
+        pairs = [(prompt, completion) for completion in completions]
+
+        # Get scores from reward model (higher = better match)
+        scores = reward_model.predict(pairs)
+
+        # Collect all raw scores for later normalization
+        all_scores.extend(scores)
+
+        scored.append({
+            "prompt": prompt,
+            "raw_scores": list(scores),  # keep raw scores temporarily
+            "completions": completions
+        })
+
+    # === Normalize scores to [0, 1] ===
+    min_score = float(np.min(all_scores))
+    max_score = float(np.max(all_scores))
+    score_range = max_score - min_score if max_score > min_score else 1.0  # avoid divide by 0
+
+    final_scored = []
+    for item in scored:
+        prompt = item["prompt"]
+        completions = item["completions"]
+        raw_scores = item["raw_scores"]
+
+        normalized_completions = []
+        for completion, score in zip(completions, raw_scores):
+            norm_score = float((score - min_score) / score_range)
+            normalized_completions.append({
+                "text": completion,
+                "score": round(norm_score, 4)
+            })
+
+        final_scored.append({
+            "prompt": prompt,
+            "scored_completions": normalized_completions
+        })
+
+    # Save results
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(final_scored, f, indent=2)
+
+    print(f"[✅] Scored completions (normalized) saved to {output_file}")
+
+# === MAIN ===
+
+if __name__ == "__main__":
+    print("[🔁] Starting Rejection Sampling Prompt Generation Pipeline...")
+
+    # Step 1: Download the instruction fine-tune DB
+    db_path = fetch_db_from_huggingface(
+        repo_id="CRM-LLM-01/CRM_Dataset",
+        filename="instruction_finetune_data_new.db",
+        token="hf_jcTCGfJxqjRJzxMYkySjEBlrYIQ"
+    )
+
+    # Step 2: Extract user queries from tables
+    print("[🔍] Extracting queries from fine-tuning DB...")
+    queries = extract_questions_from_all_tables(db_path)
+    print(f"[📥] Retrieved {len(queries)} queries")
+
+    # Step 3: Format queries into prompts
+    print("[🛠️] Generating prompts...")
+    prompts = queries
+
+    # Step 4: Save prompts to file
+    print("[💾] Saving prompts to text file...")
+    save_prompts_to_file(prompts)
+
+    # Step 5: Load tokenizer + model and sample completions
+    print("[🧠] Loading tiiuae/falcon-7b-instruct model from HuggingFace...")
+    model_name = "tiiuae/falcon-7b-instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map="auto")
+    model.eval()
+
+    print("[🎯] Generating completions for 100 prompts...")
+    sample_completions(
+        model=model,
+        tokenizer=tokenizer,
+        prompt_file="rejection_sampling_prompts.txt",
+        output_file="sampled_completions.json",
+        max_prompts=100
+    )
+
+    print("[📊] Scoring sampled completions using reward model...")
+    score_completions_with_reward_model(
+        input_file="sampled_completions.json",
+        output_file="scored_completions.json"
+    )
+
+
+
