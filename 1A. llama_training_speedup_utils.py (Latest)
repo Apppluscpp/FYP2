@@ -748,7 +748,12 @@ def train_model(model, train_loader, val_loader, optimizer, device,
                             f"LR: {lr:.2e}"
                         )
 
+                iter_train_loss = evaluate_model(model, train_loader, val_loader, device, eval_iter)[0]
                 epoch_val_loss = evaluate_model(model, train_loader, val_loader, device, eval_iter)[1]
+
+                train_losses.append(iter_train_loss)
+                val_losses.append(epoch_val_loss)
+                track_tokens_seen.append(tokens_seen)
 
                 if early_stopping:
                     
