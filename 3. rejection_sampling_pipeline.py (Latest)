@@ -87,6 +87,8 @@ def generate_text_sampled(model, idx, max_new_tokens, context_size, temperature=
     Generate text using top-k sampling.
     """
     model.eval()
+    idx = idx.to(model.device) 
+    
     for _ in range(max_new_tokens):
         idx_cond = idx[:, -context_size:]
         with torch.no_grad():
@@ -120,7 +122,7 @@ def generate_text_sampled(model, idx, max_new_tokens, context_size, temperature=
 
 
 # === SAMPLING ===
-def sample_completions(model, tokenizer, prompt_file, output_file, max_prompts=10000, completions_per_prompt=5, batch_size=32):
+def sample_completions(model, tokenizer, prompt_file, output_file, max_prompts=15000, completions_per_prompt=5, batch_size=64):
     with open(prompt_file, "r", encoding="utf-8") as f:
         all_prompts = f.read().strip().split("\n\n")
 
@@ -138,7 +140,15 @@ def sample_completions(model, tokenizer, prompt_file, output_file, max_prompts=1
             expanded_prompts.extend([prompt] * completions_per_prompt)
 
         # Tokenize all
-        inputs = tokenizer(expanded_prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
+        inputs = tokenizer(
+        expanded_prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        # max_length=131072  # add this
+        )
+
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
         # Generate in batch
         outputs = model.generate(
@@ -167,7 +177,7 @@ def sample_completions(model, tokenizer, prompt_file, output_file, max_prompts=1
 
 def score_completions_with_biencoder_batched(input_file, output_file, model_name="sentence-transformers/all-MiniLM-L6-v2", batch_size=64):
     print(f"[📥] Loading bi-encoder model: {model_name}")
-    biencoder = SentenceTransformer(model_name)
+    biencoder = SentenceTransformer(model_name, device="cuda")
     biencoder.eval()
 
     with open(input_file, "r", encoding="utf-8") as f:
@@ -308,13 +318,12 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map="auto")
     model.eval()
 
-    print("[🎯] Generating completions for 10000 prompts...")
     sample_completions(
         model=model,
         tokenizer=tokenizer,
         prompt_file="rejection_sampling_prompts.txt",
         output_file="sampled_completions.json",
-        max_prompts=10000
+        max_prompts=15000
     )
 
     print("[📊] Scoring sampled completions using reward model...")
@@ -336,4 +345,3 @@ if __name__ == "__main__":
     filtered_file="filtered_completions.json",
     output_file="filtered_reinforced_data.txt"
     )
-
